@@ -1,0 +1,67 @@
+# Snakemake config file for QC and Mash workflow
+
+# 1. Input/output parameters
+samples:
+  - sampleA
+  - sampleB
+  - sampleC
+
+
+raw_directory: "data/raw"
+host_database: "/path/to/human/genome/"
+filtered_directory: "data/tmp/human_filtered/"
+trimmed_directory: "data/tmp/trimmed_filtered/"
+
+
+# 2. rule-specific parameters
+# (resources to reserve by HPC system, SLURM)
+# Memory as megabytes, time in minutes
+
+host_removal:
+  threads: 8
+  memory: 16384 # = 16 * 1024 = 16 GiB
+  time: 240 # = 4 * 60 = 4 hours
+  
+quality_filtering:
+  threads: 8
+  memory: 2048
+  time: 30
+  
+generate_report:
+  threads: 1
+  memory: 2048
+  time: 30
+  
+create_sketch:
+  threads: 1
+  memory: 512
+  time: 30
+  
+calculate_distances:
+  threads: 1
+  memory: 512
+  time: 30
+
+
+# 3. tool-specific parameters:
+
+# gzip compression level
+compression_level: 4
+
+# for host (human) read filtering
+bowtie2:
+  mode: "--very-sensitive-local"
+  
+# for quality trimming, low-complexity filtering, adapter removal
+fastp:
+  trim: "--cut_right --cut_window_size 4 --cut_mean_quality 20"
+  minlen: "-l 75"
+  adapter: "--detect_adapter_for_pe"
+  complexity: "-y"
+  
+# for creating a report with statistics
+multiqc:
+  config: "config/preprocessing_multiqc_config.yaml"
+  
+# For creating k-mer sketches with Mash
+sketch: "-r -m 2 -s 10000"

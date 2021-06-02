@@ -1,0 +1,9 @@
+name: mash
+
+channels:
+- defaults
+- bioconda
+- conda-forge
+
+dependencies:
+- mash=2.2.2

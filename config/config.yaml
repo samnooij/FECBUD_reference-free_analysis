@@ -1,0 +1,9 @@
+printshellcmds: true
+jobs: 20
+use-conda: true
+jobname: Preprocessing-{name}.{jobid}
+latency-wait: 60
+rerun-incomplete: true
+keep-going: true
+cluster: "sbatch --parsable -N 1 -n 1 -c {threads} --mem={resources.mem} -t {resources.time} -D . -e log/SLURM/{name}-{jobid}.err -o log/SLURM/{name}-{jobid}.out"
+cluster-status: bin/slurm-cluster-status/slurm-cluster-status.py
