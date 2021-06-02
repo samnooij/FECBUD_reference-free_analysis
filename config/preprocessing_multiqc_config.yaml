@@ -1,0 +1,7 @@
+title: "Preprocessing report: quality control metrics"
+
+extra_fn_clean_trim:
+  - "host_removal-"
+
+extra_fn_clean_exts:
+  - "-fastp"
