@@ -1,0 +1,637 @@
+---
+title: "Engraftment analysis of FECBUD FMT data using sequence composition"
+author: "Sam Nooij"
+date: "21 May 2021"
+output: 
+  html_document:
+    toc: yes
+    toc_depth: 3
+    code_folding: show
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmarkdown)
+library(here)
+library(codetools)
+library(tidyverse)
+library(ggpubr)
+library(pheatmap)
+library(viridisLite)
+library(vegan)
+
+knitr::opts_chunk$set(fig.height = 8, fig.width = 12, fig.path = here("figures", ""),
+                      fig.ext = c("png", "pdf"), dev = c("png", "pdf"), dpi = 80,
+                      echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE,
+                      cache = TRUE)
+```
+
+
+# Introduction: Engraftment analysis of FECBUD FMT metagenomes using sequence (k-mer) composition
+
+For the 'FECBUD' trial, 24 patients with active ulcerative colitis (UC) have been treated
+with Fecal Microbiota Transplantation (FMT) and either a steroid, budesonide, or a placebo.
+(12 patients each.)
+Within each of these two treatment groups, patients were randomly assigned one out of two
+healthy feces donors from the Netherlands Donor Feces Bank (NDFB; donors A and B; 6 patients each).
+The induction therapy was a 3 week course of budesonide.
+Then, patients received a bowel lavage before (the first) FMT.
+FMT was administered at four moments as an infusion through a nasoduodenal tube, 
+each a week after the previous FMT.
+The main research question is whether budesonide affects (improves) engraftment of donor
+bacteria in the patient.
+
+To test this hypothesis, fecal samples have been collected from the donors, and from the 
+patients at nine different time points: before treatment (baseline), 
+before each FMT (FMT1-FMT4), and finally, 1, 2, 4 and 8 weeks after the last FMT (week 7 - week 14).
+
+From each of these fecal samples, total DNA was isolated and sequenced on an Illumina NovaSeq machine
+as 100 bp reads.
+
+The raw reads were pre-processed by first removing human-derived reads and then
+quality-trimming, adapter and low-complexity read removal and filtering reads to a length
+of at least 75 bp.
+(The results of which are visualised in [this report](../doc/Proprocessing_report.html).)  
+_N.B. reads were treated as single-end._
+
+Then, k-mer sketches for each metagenome were generated with [Mash](https://github.com/marbl/Mash) version 2.2.2
+(generating 10,000 non-unique sketches for each sample - so only including k-mers that occur at least twice).
+From these so-called sketches, Jaccard distances were calculated as a measure of dissimilarity between metagenomes.
+These Jaccard distances are imported into R for the current analysis.
+
+```{r import_data}
+# First, import the Jaccard distances, p-values and number of overlapping k-mers:
+mash_distances <- read.delim(here("..", "data", "processed", "Mash_distances.tsv"),
+                             header = FALSE)
+
+# Add column names to make it easier to interpret the dataframe
+colnames(mash_distances) <- c("from_ID", "to_ID", "distance", "pvalue", "overlaps")
+
+# Then, import additional metadata (subject ID and timepoint)
+metadata_sheet <- read.delim(here("..", "..", "..", "data", "27APR2021_LeidenIBD_OneCodexList.csv"))
+
+patient_metadata <- read.delim(here("..", "..", "..", "data", "patient_metadata.csv"))
+```
+
+There are three samples that have fewer than 50,000 reads left after pre-processing.
+With such low numbers, it is impossible to calculate reliable distances,
+so these samples are removed from the further analysis.
+
+```{r exclude_samples}
+# Import results from pre-processing:
+# 1. mapping to the human genome
+human_mapping <- read.delim(here("..", "doc", "Preprocessing_report_data", "multiqc_bowtie2.txt"))
+
+# 2. quality-trimming and length filtering
+filtering <- read.delim(here("..", "doc", "Preprocessing_report_data", "mqc_fastp_filtered_reads_plot_1.txt"))
+
+under_50k_reads <- filtering %>%
+  filter(Passed.Filter < 50000) %>%
+  select(Sample)
+
+
+mash_distances <- mash_distances %>% 
+  filter(! from_ID %in% under_50k_reads[[1]]) %>%
+  filter(! to_ID %in% under_50k_reads[[1]])
+# Exclude any line that has the 'from_ID' in the list of samples with < 50k reads,
+# or the 'to_ID' in that list.
+```
+
+## All distances as heatmap
+
+```{r create_distance_matrix}
+mash_distance_matrix_df <- mash_distances %>%
+  unique() %>%
+  pivot_wider(id_cols = "from_ID", names_from = "to_ID", values_from = "distance")
+
+mash_distance_matrix <- as.matrix(mash_distance_matrix_df %>% select(-from_ID))
+
+rownames(mash_distance_matrix) <- mash_distance_matrix_df$from_ID
+colnames(mash_distance_matrix) <- colnames(mash_distance_matrix_df)[2:ncol(mash_distance_matrix_df)]
+
+# Sort the matrix by IDs
+mash_distance_matrix <- mash_distance_matrix[order(rownames(mash_distance_matrix)), 
+                                             order(colnames(mash_distance_matrix))]
+
+# This matrix does not include all self-comparisons, so extend the matrix to include the missing ones
+complete_mash_distance_matrix <- matrix(0, nrow = ncol(mash_distance_matrix_df),
+                                        ncol = ncol(mash_distance_matrix_df))
+
+complete_mash_distance_matrix[2:ncol(mash_distance_matrix_df),1:ncol(mash_distance_matrix_df) - 1] <-  mash_distance_matrix
+rownames(complete_mash_distance_matrix) <- c(mash_distances$to_ID[1], rownames(mash_distance_matrix))
+colnames(complete_mash_distance_matrix) <- c(colnames(mash_distance_matrix), mash_distances$from_ID[nrow(mash_distances)])
+
+# And fill the NA values with 0 to enable filling the other half triangle
+# and have 0 distances between 'selves'
+complete_mash_distance_matrix <- complete_mash_distance_matrix %>% replace_na(0)
+
+# This matrix holds only half the values (i.e. no duplicates),
+# to add them use:
+complete_mash_distance_matrix <- complete_mash_distance_matrix + t(complete_mash_distance_matrix)
+
+# Also, for heatmaps it's nice to be based on similarity rather than
+# distances/dissimilarity, so convert it by using (1 - Jaccard distance)
+mash_similarity_matrix <- 1 - complete_mash_distance_matrix
+
+# Take a quick first look at the data in a heatmap
+pheatmap(mash_similarity_matrix,
+         fontsize = 6)
+```
+
+**Figure 1,** heatmap of Mash-based Jaccard similarities.
+
+Now that there is a distance and similarity matrix, let's feed that into an MDS algorithm
+to generate ordination plots.
+
+```{r generate_mds_dataframe}
+nmds <- metaMDS(complete_mash_distance_matrix, k = 2)
+
+# Quick evaluation of NMDS
+stressplot(nmds)
+
+nmds_df <- as.data.frame(nmds$points)
+
+nmds_df$Sample_ID <- rownames(nmds_df)
+```
+
+**Figure 2**, stressplot for evaluation of non-metric multidimensional scaling.
+
+The 'stress' value for above NMDS is 0.189, meaning the goodness of fit is only fair, not particularly good. (That is, some distances are misleading.) 
+As the value is still below 0.2, displaying these data in two dimensions should work okay.
+
+
+## Metagenomic distances as ordination plots
+
+```{r show_ordination_plots}
+# Add subject ID and timepoint to the nmds dataframe
+nmds_df <- merge(x = nmds_df, y = metadata_sheet %>%
+                   select(Sample.ID, Timepoint, Donor_ID),
+                 by.x = "Sample_ID",
+                 by.y = "Sample.ID")
+
+# Also add which patient was treated by which donor
+nmds_df <- merge(x = nmds_df, y = patient_metadata %>%
+                   select(Patient.ID, Donor_alias),
+                 by.x = "Donor_ID",
+                 by.y = "Patient.ID",
+                 all.x = TRUE
+                 )
+
+# Complete column by adding donor aliases to the donors
+nmds_df$Donor_alias[is.na(nmds_df$Donor_alias)] <- nmds_df$Timepoint[is.na(nmds_df$Donor_alias)]
+nmds_df$Donor_alias <- as.factor(nmds_df$Donor_alias)
+
+# Overwrite donor IDs by 'Donor A' and 'Donor B' from the 'Timepoint' column
+nmds_df <- nmds_df %>% 
+  mutate(Subject_ID = ifelse(Donor_ID < 130, Donor_ID, as.character(Timepoint))) %>%
+  select(-Donor_ID)
+
+# Harmonize timepoint spelling by removing superfluous spaces
+nmds_df$Timepoint[nmds_df$Timepoint == "FMT 1"] <- "FMT1"
+nmds_df$Timepoint[nmds_df$Timepoint == "Week 7"] <- "Week7"
+nmds_df$Timepoint[nmds_df$Timepoint == "Week 8"] <- "Week8"
+nmds_df$Timepoint[nmds_df$Timepoint == "Week  10"] <- "Week10"
+nmds_df$Timepoint[nmds_df$Timepoint == "Week 10"] <- "Week10"
+nmds_df$Timepoint[nmds_df$Timepoint == "Week 8/10"] <- "Week8/10"
+nmds_df$Timepoint[nmds_df$Timepoint == "Week 14"] <- "Week14"
+
+nmds_df$Timepoint <- factor(x = nmds_df$Timepoint,
+                            levels = c("Donor A", "Donor B", "Baseline",
+                                       "FMT1", "FMT2", "FMT3", "FMT4",
+                                       "Week7", "Week8", "Week8/10", "Week10", "Week14"))
+
+
+donor_mds_plot <- ggscatter(data = nmds_df %>%
+                              filter(Subject_ID == "Donor A" | Subject_ID == "Donor B"),
+                                   x = "MDS1",
+                                   y = "MDS2",
+                                   color = "Subject_ID",
+                                   shape = "Subject_ID",
+                                   palette = viridis(4)[c(1,3)],
+                                   ellipse = TRUE, mean.point = TRUE,
+                                   star.plot = TRUE) +
+  labs(color = "Donor",
+       fill = "Donor",
+       shape = "Donor")
+
+donor_mds_plot
+
+
+timepoint_mds_plot <- ggscatter(data = nmds_df,
+                                x = "MDS1",
+                                y = "MDS2",
+                                color = "Timepoint",
+                                shape = "Timepoint",
+                                palette = viridis(25)[c(1,3,5,8,9,10,11,18,19,20,21,22)],
+                                ellipse = FALSE, mean.point = FALSE,
+                                star.plot = FALSE) +
+  scale_shape_manual(values = c(3, 4, 21, 15, 16, 17, 18, 7, 9, 10, 12, 13)) + 
+  theme(legend.position = "right")
+
+timepoint_mds_plot
+
+# Or excluding dots that are very far from the rest:
+timepoint_mds_plot + xlim(c(-0.06, 0.11))
+
+
+donor_A_plot <- ggscatter(data = nmds_df %>% filter(Donor_alias == "Donor A"),
+                          x = "MDS1",
+                          y = "MDS2",
+                          color = "Timepoint",
+                          shape = "Timepoint",
+                          palette = viridis(25)[c(1,5,8,9,10,11,18,19,20,21,22)],
+                          ) +
+  scale_shape_manual(values = c(3, 21, 15, 16, 17, 18, 7, 9, 10, 12, 13)) +
+  theme(legend.position = "right") +
+  ggtitle("Only donor A")
+
+donor_A_plot
+
+# Ignoring outliers:
+donor_A_plot + xlim(c(-.06,0.06))
+
+
+donor_A_plot_with_labels <- ggscatter(
+  data = nmds_df %>% filter(Donor_alias == "Donor A"),
+  x = "MDS1",
+  y = "MDS2",
+  color = "Timepoint",
+  shape = "Timepoint",
+  palette = viridis(25)[c(1,5,8,9,10,11,18,19,20,21,22)],
+  label = "Subject_ID",
+  repel = TRUE
+) +
+  scale_shape_manual(values = c(4, 21, 15, 16, 17, 18, 7, 9, 10, 12, 13)) +
+  theme(legend.position = "right") +
+  ggtitle("Only donor A")
+
+donor_A_plot_with_labels + xlim(c(-.06,0.06))
+
+
+donor_B_plot <- ggscatter(data = nmds_df %>% filter(Donor_alias == "Donor B"),
+                          x = "MDS1",
+                          y = "MDS2",
+                          color = "Timepoint",
+                          shape = "Timepoint",
+                          palette = viridis(25)[c(3,5,8,9,10,11,18,19,20,21,22)],
+                          ) +
+  scale_shape_manual(values = c(4, 21, 15, 16, 17, 18, 7, 9, 10, 12, 13)) +
+  theme(legend.position = "right") +
+  ggtitle("Only donor B")
+
+donor_B_plot
+
+# Ignoring outliers:
+donor_B_plot + xlim(c(-0.05,.11)) + ylim(c(-0.08,0.07))
+
+
+donor_B_plot_with_labels <- ggscatter(
+                            data = nmds_df %>%
+                              filter(Donor_alias == "Donor B"),
+                            x = "MDS1",
+                            y = "MDS2",
+                            color = "Timepoint",
+                            shape = "Timepoint",
+                            palette = viridis(25)[c(3,5,8,9,10,11,18,19,20,21,22)],
+                            label = "Subject_ID",
+                            repel = TRUE
+) +
+  scale_shape_manual(values = c(4, 21, 15, 16, 17, 18, 7, 9, 10, 12, 13)) +
+  theme(legend.position = "right") +
+  ggtitle("Only donor B")
+
+donor_B_plot_with_labels + xlim(c(-0.05,.11)) + ylim(c(-0.08,0.07))
+```
+
+**Figures 3-11.** Ordination plots of donor and FMT recipient metagenomes using non-metric multidimensional scaling (NMDS) of sequence composition-based Jaccard distances.
+These figures show that:
+
+ - donors A and B have distinct metagenomes (first figure).  
+ - Baseline (pre-FMT) patient samples may be quite different, but also similar to donor metagenomes (second figure, open circles and crosses).  
+ - FMT samples are generally more different from donor samples than the 7-14 weeks after FMT samples (blue filled shapes vs. green crossed shapes).  
+     - A notable exception is patient 121, whose metagenome is further away from the donors after 7+ weeks.  
+     - Also, 121's baseline sample is very different from the rest. 124 is similar in that their metagenomes are also relatively far from the donor's. And perhaps 102 should then be noted, too.
+
+Note that some figures are included with adjusted axis limits, like cut-outs of the originals.
+These serve to have a better look at the cloud of shapes in the middle, which are hard to distinguish otherwise.
+
+Let's have a closer look at these data per patient.
+
+## Patient to donor similarities
+
+```{r per_patient_distances_to_donor, fig.height=10, fig.width=16}
+# To calculate and visualize per patient distances to the donor,
+# I want to use average distances to all donor metagenomes.
+# To do that, I need:
+# - Patient IDs coupled to sample IDs
+# - Donor IDs coupled to sample IDs
+# - Patient ID - donor ID coupling
+# - a way to calculate average per sample distances to all donor metagenomes of a given donor
+# - for visualisation, perhaps it is nicest to use the 'similarity' measure rather than distances
+#   (higher = better makes it easier to read and interpret)
+
+# Match patient metadata to dataframe:
+mash_similarities <- merge(x = mash_distances,
+                           y = metadata_sheet %>%
+                             select(Sample.ID, Donor_ID, Timepoint),
+                           by.x = "to_ID",
+                           by.y = "Sample.ID",
+                           all.x = TRUE) %>%
+  filter(grepl("TUB", from_ID)) %>% # to select only distances from donors
+  rename(Patient_ID = Donor_ID) %>%
+  filter(! grepl("D", Patient_ID)) # to remove distances from donor to donor
+
+# Calculate Jaccard similarities
+mash_similarities$similarity <- with(mash_similarities,
+                                     1 - distance)
+
+# Then add the donor IDs
+mash_similarities <- merge(x = mash_similarities,
+                           y = metadata_sheet %>%
+                            select(Sample.ID, Timepoint),
+                           by.x = "from_ID",
+                           by.y = "Sample.ID",
+                           all.x = TRUE) %>%
+  rename(Donor_ID = Timepoint.y,
+         Timepoint = Timepoint.x)
+
+# Now average the similarities and distances per donor
+mash_similarities <- mash_similarities %>%
+  group_by(Patient_ID, Timepoint, Donor_ID) %>% 
+  summarise(mean_similarity = mean(similarity),
+            mean_distance = mean(distance))
+
+# Fix the timepoints by removing superfluous spaces
+mash_similarities$Timepoint[mash_similarities$Timepoint == "FMT 1"] <- "FMT1"
+mash_similarities$Timepoint[mash_similarities$Timepoint == "Week 7"] <- "Week7"
+mash_similarities$Timepoint[mash_similarities$Timepoint == "Week 8"] <- "Week8"
+mash_similarities$Timepoint[mash_similarities$Timepoint == "Week  10"] <- "Week10"
+mash_similarities$Timepoint[mash_similarities$Timepoint == "Week 10"] <- "Week10"
+mash_similarities$Timepoint[mash_similarities$Timepoint == "Week 8/10"] <- "Week8/10"
+mash_similarities$Timepoint[mash_similarities$Timepoint == "Week 14"] <- "Week14"
+
+mash_similarities$Timepoint <- factor(x = mash_similarities$Timepoint,
+                                      levels = c("Baseline",
+                                                 "FMT1", "FMT2", "FMT3", "FMT4",
+                                                 "Week7", "Week8", "Week8/10", "Week10", "Week14"))
+
+per_patient_similarity_plot <-ggline(data = mash_similarities,
+                                     x = "Timepoint",
+                                     y = "mean_similarity",
+                                     color = "Donor_ID",
+                                     palette = c("#00AFBB", "#E7B800"),
+                                     shape = "Donor_ID",
+                                     facet.by = "Patient_ID") +
+  theme(axis.text.x = element_text(angle = 45, vjust =.5,
+                                   size = 10),
+        legend.position = "right") +
+  ylab("Mean Jaccard similarity") +
+  ggtitle("Mean patient to donor metagenome similarity")
+
+per_patient_similarity_plot
+```
+
+**Figure 12.** Average Jaccard similarities with each donor, per patient and per timepoint.  
+Higher values indicate higher similarity. 
+Apart from a few dips (e.g. see patients 111 and 113), it seems that the general similarity to donor metagenomes is high and often increases over time. 
+Patients 114, 121, 122 and 123 show decreased similarity over time, which may be an indication of less durable engraftment.
+
+Interestingly, when matching these figures to the actual donors used per patient, there are some differences. 
+Most figures show roughly identical lines/dots or donor A is clearly higher.
+However, only half of the patients were treated by donor A.
+
+**Table 1.** Patient-donor matching. Patients with visibly more similarity their respective donor are highlighted in **bold**.
+
+| Patient | Donor |
+| ------- | ----- |
+| 101     | **A** |
+| 102     | B     |
+| 103     | B     |
+| 104     | **B** |
+| 105     | **A** |
+| 106     | **B** |
+| 107     | **B** |
+| 108     | **A** |
+| 109     | **A** |
+| 110     | **A** |
+| 111     | **A** |
+| 112     | **B** |
+| 113     | B     |
+| 114     | **A** |
+| 115     | B     |
+| 116     | -     |
+| 117     | **A** |
+| 118     | **A** |
+| 119     | **A** |
+| 120     | B     |
+| 121     | **A** |
+| 122     | **A** |
+| 123     | B     |
+| 124     | B     |
+| 125     | **B** |
+
+_Note: there is no patient 116 in the dataset._  
+
+```{r patient_donor_similarities-only_matching, fig.height=12}
+# Now, make the same figure as above, but only show matching donor-patient pairs
+matching_mash_similarities <- mash_similarities %>%
+  filter(Patient_ID == "101" & Donor_ID == "Donor A" |
+           Patient_ID == "102" & Donor_ID == "Donor B" |
+           Patient_ID == "103" & Donor_ID == "Donor B" |
+           Patient_ID == "104" & Donor_ID == "Donor B" |
+           Patient_ID == "105" & Donor_ID == "Donor A" |
+           Patient_ID == "106" & Donor_ID == "Donor B" |
+           Patient_ID == "107" & Donor_ID == "Donor B" |
+           Patient_ID == "108" & Donor_ID == "Donor A" |
+           Patient_ID == "109" & Donor_ID == "Donor A" |
+           Patient_ID == "110" & Donor_ID == "Donor A" |
+           Patient_ID == "111" & Donor_ID == "Donor A" |
+           Patient_ID == "112" & Donor_ID == "Donor B" |
+           Patient_ID == "113" & Donor_ID == "Donor B" |
+           Patient_ID == "114" & Donor_ID == "Donor A" |
+           Patient_ID == "115" & Donor_ID == "Donor B" |
+           Patient_ID == "117" & Donor_ID == "Donor A" |
+           Patient_ID == "118" & Donor_ID == "Donor A" |
+           Patient_ID == "119" & Donor_ID == "Donor A" |
+           Patient_ID == "120" & Donor_ID == "Donor B" |
+           Patient_ID == "121" & Donor_ID == "Donor A" |
+           Patient_ID == "122" & Donor_ID == "Donor A" |
+           Patient_ID == "123" & Donor_ID == "Donor B" |
+           Patient_ID == "124" & Donor_ID == "Donor B" |
+           Patient_ID == "125" & Donor_ID == "Donor B"
+         )
+
+per_patient_similarity_plot_matching <- ggline(data = matching_mash_similarities,
+                                               x = "Timepoint",
+                                               y = "mean_similarity",
+                                               color = "Donor_ID",
+                                               palette = c("#00AFBB", "#E7B800"),
+                                               shape = "Donor_ID") +
+  facet_wrap("Patient_ID", nrow = 6, ncol = 4) +
+  theme(axis.text.x = element_text(angle = 45, vjust =.9, hjust = .95,
+                                   size = 10),
+        legend.position = "right") +
+  ylab("Mean Jaccard similarity") +
+  ggtitle("Mean patient to donor metagenome similarity")
+
+per_patient_similarity_plot_matching
+```
+
+**Figure 13.** Mean patient to donor metagenome similarities, showing only matching donor-patient pairs.
+
+```{r delta_similarity_to_donor, fig.height=12}
+# Now, to calculate the relative changes over time, calculate the similarity to the donor minus the baseline similarity
+# In that way, the baseline similarity is 0 and later samples show whether the similarity to the donor increased or decreased.
+
+# To calculate this, first add a row with baseline similarities to the dataframe:
+baselines_df <- matching_mash_similarities %>%
+  filter(Timepoint == "Baseline") %>% # use only baseline similarities/distances
+  select(Patient_ID, mean_similarity, mean_distance) # then select only the required columns
+
+baselines_df <- baselines_df %>% rename(
+  baseline_distance = mean_distance,
+  baseline_similarity = mean_similarity,
+)
+
+# Now merge these back into the dataframe with all timepoints
+matching_mash_similarities <- merge(x = matching_mash_similarities,
+                                    y = subset(baselines_df,
+                                               select=c(-Timepoint)),
+                                    by = "Patient_ID",
+                                    all.x = TRUE)
+
+# And use these baseline values to calculate differences from baseline
+matching_mash_similarities <- matching_mash_similarities %>%
+  mutate(delta_distance = mean_distance - baseline_distance,
+         delta_similarity = mean_similarity - baseline_similarity)
+
+# Finally, show a similar plot as above, but now with the changes in similarity
+delta_similarity_plot <- ggline(data = matching_mash_similarities,
+                                x = "Timepoint",
+                                y = "delta_similarity",
+                                color = "Donor_ID",
+                                palette = c("#00AFBB", "#E7B800"),
+                                shape = "Donor_ID") +
+  facet_wrap("Patient_ID", nrow = 6, ncol = 4) +
+  theme(axis.text.x = element_text(angle = 45, vjust =.9, hjust = .95,
+                                   size = 10),
+        legend.position = "right") +
+  ylab("Mean Jaccard similarity difference from baseline") +
+  ggtitle("Mean patient to donor metagenome similarity, compared to baseline")
+
+delta_similarity_plot
+```
+
+**Figure 14.** The outliers with very low values for patients 111 and 113 likely derive from their metagenomes with a very high fraction of human reads.
+Perhaps the above figure looks better if these values are left out:
+
+```{r delta_similarity_to_donor-without_outliers, fig.height=12}
+delta_similarity_plot_filtered <- ggline(data = matching_mash_similarities %>%
+                                           filter(! (Patient_ID == "111" & Timepoint == "Week10")) %>% 
+                                           filter(! (Patient_ID == "113" & Timepoint == "FMT2")) %>%
+                                           filter(! (Patient_ID == "113" & Timepoint == "FMT4")),
+                                         x = "Timepoint",
+                                         y = "delta_similarity",
+                                         color = "Donor_ID",
+                                         palette = c("#00AFBB", "#E7B800"),
+                                         shape = "Donor_ID") +
+  facet_wrap("Patient_ID", nrow = 6, ncol = 4) +
+  geom_hline(yintercept=0, linetype="dotted") +
+  theme(axis.text.x = element_text(angle = 45, vjust =.9, hjust = .95,
+                                   size = 10),
+        legend.position = "right") +
+  ylab("Mean Jaccard similarity difference from baseline") +
+  ggtitle("Mean patient to donor metagenome similarity, compared to baseline")
+
+delta_similarity_plot_filtered
+```
+
+**Figure 15.** Similarity to donor changes compared to baseline metagenome. Dotted lines mark Y=0, values above the dotted line indicate increased similarity to donor (or successful engraftment); values below the line indicate metagenomes that are less similar to the donor than the baseline sample.
+
+Engraftment seems okay in patients 101, 107, 110, 111, 112, 119, 120, 121, 124 and 125, 
+although a number of them have a sample in between that is less like the donor metagenome than the baseline sample. 
+In general, these patients' metagenomes show increased similarity to the donor.
+
+### Note on high-host (many human reads) samples
+
+According to `bowtie2`, the following samples have > 90% human reads (of the total number of raw reads; sorted from highest to lower human fraction).  
+Samples listed **in bold** have > 99% human reads.
+
+ - **117, baseline**  
+ - **117, FMT2**  
+ - 111, Week 10  
+ - 113, FMT4  
+ - 113, FMT2  
+ - 121, baseline  
+ - 123, FMT2  
+
+For 117, these are the only two available metagenomes. However, 117's similarities to donors are not so different from the other patients.  
+For 111, this matches to 'off' sample in the similarities to donor figure.  
+For 113, this also matches the 'off' samples.  
+For 121 this may have influenced the baseline sample.  
+For 123, there seems to have been no serious influence on the similarity to the donors.
+
+This still leaves similarity drops unexplained in patients 107 (FMT3), 108 (FMT1), 119 (baseline and FMT3), 120 (FMT 1 and 3) and 124 (FMT2).  
+Their respective percentage of human reads are: 107, FMT3: 51.5%; 108, FMT1: 20.4%; 119, baseline: 66.9%, FMT3: 88.1%; 120, FMT1: 78.5%, FMT3: 70.8%; 123, FMT2: 63.3%.
+
+Even though most of these percentages are high, these numbers are not very different from many other patient metagenomes. Therefore, 'high host' can only explain a few drops in similarity, not all.
+
+### Note on low read numbers and remaining dips in similarity plots
+
+It is worth noting that most samples/metagenomes that make a clearly visible dip in the similarity to donor plots (e.g. figure 15)
+have relatively low numbers of reads left after pre-processing.
+That is, most have approximately 250k reads left.
+(The median for all metagenomes is 968k and the mean 801k.)
+
+This is true for samples:
+
+| Patient | Timepoint | Reads left |
+| ------- | --------- | ---------- |
+| 107     | FMT3      | 176k       |
+| 108     | FMT1      | 336k       |
+| 114     | FMT4      | 383k       |
+| 119     | FMT3      | 266k       |
+| 120     | FMT1      | 204k       |
+| 120     | FMT3      | 328k       |
+| 123     | FMT2      | 132k       |
+
+However, this is not always true.
+For example, patient 118, timepoint FMT1 has 961k reads and seems to have too low similarity.
+On the other side are for example 119, 121 and 123 baseline, and 123 FMT4 that have low read counts, but do not seem to give such bad similarities.
+
+In short, it is not so easy to tell from the read numbers alone whether similarity estimates will be accurate.
+Therefore, all these samples are still included in the figures for now.
+
+(There are 21 out of 209 metagenomes that have < 400k reads left after pre-processing, of which 13 under 200k.
+Leaving these out probably results in more accurate results, but it feels like a pity to exclude so many.)
+
+
+---
+
+**To do:**
+
+ - finalize analysis by calculating acute (per timepoint) and durable engraftment values (with area-under-curve)
+
+---
+
+# Conclusions
+
+ - Donors A and B have relatively stable metagenomes and are distinct from each other  
+ - In general, it seems that metagenomes of recipients become more like their donors' over time (by 'eyeball statistics')  
+ - Donor A seems to give a clearer engraftment signal in recipients than donor B (Figure 12)
+ - Four patients' metagenomes show a decreasing similarity to the donor over time, which may indicate less durable engraftment (114, 121, 122 and 123) 
+     - if these have been treated by the same method (budesonide or placebo), than this can support the hypothesis that this pre-treatment negatively affects engraftment
+     - However, it must be noted that none of these patients have the complete timeseries, so these results must be interpreted with caution  
+     - Compared to the baseline sample, based on similarity to the donor metagenome and ignoring obvious outliers due to high fractions of human reads, engraftment seems to have been best in patients 110, 111, 119, 121 and 124 (their values look the highest in figure 15), and also seems to have been okay in 101, 107, 112 and 125.  
+     - Using the same criteria as above, engraftment looks worst in patients 106, 115, 118, 122 and 123; whose metagenomes appear to become most distant from the donor metagenomes over time.
+
+---
+
+# Software used
+
+```{r session_info}
+sessionInfo()
+```
