@@ -136,7 +136,8 @@ snakemake --profile config # If that was successful, run the workflow
 
 ## License
 
-This project is licensed under the terms of the [fill in your licence here](LICENSE).
+This project is licensed under the terms of the [MIT](LICENSE) license.
+(C) 2021, [Leiden University Medical Center](https://www.lumc.nl)
 
 ---
 
