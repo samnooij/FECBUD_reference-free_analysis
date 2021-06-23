@@ -1,6 +1,11 @@
+[![Project Status: WIP – Initial development is in progress, but there has not yet been a stable, usable release suitable for the public.](https://www.repostatus.org/badges/latest/wip.svg)](https://www.repostatus.org/#wip)
+
 # FECBUD reference-free engraftment analysis
 
 Computational analysis workflow and results summary of the reference-free engraftment analysis of the FECBUD study.
+
+_Note this project is a work in progress!_  
+_The current analysis shows a quick, preliminary analysis. The exact methods and results will change before publication of the manuscript._
 
 ---
 
